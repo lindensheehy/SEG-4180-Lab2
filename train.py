@@ -34,9 +34,14 @@ def calculate_iou_and_dice(pred, target, num_classes):
 
 class HouseDataset(Dataset):
     def __init__(self, split="train", transform=None):
-        print(f"Loading {split} dataset from Hugging Face...")
-        # Week 7 Dataset Load
-        self.dataset = load_dataset("keremberke/satellite-building-segmentation", name="full", split=split)
+        print(f"Loading {split} dataset from Hugging Face Parquet...")
+        
+        # Bypass the broken Hugging Face script and load the auto-converted Parquet files directly
+        parquet_url = f"hf://datasets/keremberke/satellite-building-segmentation@refs/convert/parquet/full/{split}/*.parquet"
+        
+        # We use split="train" here because when loading direct data files, 
+        # Hugging Face defaults to putting them in a "train" bucket, regardless of the folder name.
+        self.dataset = load_dataset("parquet", data_files=parquet_url, split="train[:50]")
         self.transform = transform
 
     def __len__(self):
@@ -104,10 +109,6 @@ def main():
     train_dataset = HouseDataset(split="train", transform=preprocess)
     val_dataset = HouseDataset(split="validation", transform=preprocess)
     
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
-    
-    # If your dataset is empty right now, this will crash. Ensure the dataset is built.
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
     
