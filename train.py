@@ -1,7 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import models
+from torchvision import models, transforms
+from torch.utils.data import DataLoader, Dataset
+from datasets import load_dataset
+import numpy as np
+from PIL import Image
 
 def calculate_iou_and_dice(pred, target, num_classes):
     """Calculates Intersection over Union (IoU) and Dice Score."""
@@ -16,7 +20,7 @@ def calculate_iou_and_dice(pred, target, num_classes):
         union = pred_inds.sum().item() + target_inds.sum().item() - intersection
         
         if union == 0:
-            iou_list.append(float('nan'))  # Ignore if class not in ground truth
+            iou_list.append(float('nan')) 
         else:
             iou_list.append(intersection / union)
             
@@ -28,14 +32,88 @@ def calculate_iou_and_dice(pred, target, num_classes):
             
     return iou_list, dice_list
 
+class HouseDataset(Dataset):
+    def __init__(self, split="train", transform=None):
+        print(f"Loading {split} dataset from Hugging Face...")
+        # Week 7 Dataset Load
+        self.dataset = load_dataset("keremberke/satellite-building-segmentation", name="full", split=split)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    # Week 7 Mask Generation Function
+    def make_mask(self, labelled_bbox, image):
+        x_min_ones, y_min_ones, width_ones, height_ones = labelled_bbox
+        x_min_ones, y_min_ones, width_ones, height_ones = int(x_min_ones), int(y_min_ones), int(width_ones), int(height_ones)
+        
+        mask_instance = np.zeros((image.width, image.height))
+        last_x = x_min_ones + width_ones
+        last_y = y_min_ones + height_ones
+        mask_instance[x_min_ones:last_x, y_min_ones:last_y] = np.ones((int(width_ones), int(height_ones)))
+        return mask_instance.T
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        image = item["image"].convert("RGB")
+        
+        # Start with a blank background mask (all zeros)
+        combined_mask = np.zeros((image.height, image.width))
+        
+        # Combine all house bounding boxes in this image into the mask
+        for bbox in item["objects"]["bbox"]:
+            mask_instance = self.make_mask(bbox, image)
+            # Use np.maximum to combine overlapping house masks
+            combined_mask = np.maximum(combined_mask, mask_instance)
+        
+        # Convert mask to PIL Image so torchvision transforms can resize it easily
+        mask_img = Image.fromarray((combined_mask * 255).astype(np.uint8))
+        
+        if self.transform:
+            # We must apply the SAME transform (like resizing/cropping) to both the image and the mask
+            # so the pixels still line up.
+            image = self.transform(image)
+            
+            # Mask needs specific handling: no normalization, and resized using nearest neighbor 
+            # to keep it strictly 0 (background) and 1 (house)
+            mask_transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+            ])
+            mask_img = mask_transform(mask_img)
+            
+        # Convert mask to a PyTorch tensor of class indices (0 or 1)
+        mask_tensor = torch.tensor(np.array(mask_img) > 0, dtype=torch.long)
+        
+        return image, mask_tensor
+
 def main():
-    # 1. TODO: Insert Week 7 Pixel Mask Generation and Dataloader here
-    # train_loader = ...
-    # val_loader = ...
-    
-    # 2. Setup Model (e.g., DeepLabV3 or UNet)
-    model = models.segmentation.deeplabv3_mobilenet_v3_large(num_classes=2)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Training on: {device}")
+
+    # 1. Initialize your Datasets and DataLoaders
+    # The transform matches the Preprocess steps expected by DeepLabV3 in app.py
+    preprocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    # Note: To save time testing, you might want to use a subset of the data first
+    train_dataset = HouseDataset(split="train", transform=preprocess)
+    val_dataset = HouseDataset(split="validation", transform=preprocess)
+    
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+    
+    # If your dataset is empty right now, this will crash. Ensure the dataset is built.
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+    
+    # 2. Setup Model 
+    # num_classes=2 assuming Background (0) and House (1)
+    model = models.segmentation.deeplabv3_mobilenet_v3_large(num_classes=2)
     model = model.to(device)
     
     criterion = nn.CrossEntropyLoss()
@@ -46,29 +124,45 @@ def main():
     for epoch in range(epochs):
         model.train()
         print(f"Epoch {epoch+1}/{epochs}")
-        # for images, masks in train_loader:
-            # images, masks = images.to(device), masks.to(device)
-            # optimizer.zero_grad()
-            # outputs = model(images)['out']
-            # loss = criterion(outputs, masks)
-            # loss.backward()
-            # optimizer.step()
+        running_loss = 0.0
+        
+        for images, masks in train_loader:
+            images, masks = images.to(device), masks.to(device)
+            optimizer.zero_grad()
             
-        # 4. Evaluation Loop (Calculate IoU and Dice on Val/Test set)
+            outputs = model(images)['out']
+            loss = criterion(outputs, masks)
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item()
+            
+        print(f"Training Loss: {running_loss/len(train_loader):.4f}")
+            
+        # 4. Evaluation Loop
         model.eval()
-        total_iou = 0
-        total_dice = 0
-        batches = 0
+        total_iou, total_dice, batches = 0, 0, 0
+        
         with torch.no_grad():
-            # for images, masks in val_loader:
-                # outputs = model(images.to(device))['out']
-                # iou, dice = calculate_iou_and_dice(outputs, masks.to(device), num_classes=2)
-                # total_iou += iou[1] # Assuming class '1' is the house
-                # total_dice += dice[1]
-                # batches += 1
-            pass
-            
-        # print(f"Val IoU: {total_iou/batches:.4f} | Val Dice: {total_dice/batches:.4f}")
+            for images, masks in val_loader:
+                images, masks = images.to(device), masks.to(device)
+                outputs = model(images)['out']
+                
+                iou, dice = calculate_iou_and_dice(outputs, masks, num_classes=2)
+                
+                # We only care about class '1' (the house) metrics
+                if not torch.isnan(torch.tensor(iou[1])):
+                    total_iou += iou[1]
+                    total_dice += dice[1]
+                    batches += 1
+                    
+        if batches > 0:
+            print(f"Val IoU: {total_iou/batches:.4f} | Val Dice: {total_dice/batches:.4f}")
+
+    # 5. Save the trained weights
+    print("Saving model weights to house_model.pth...")
+    torch.save(model.state_dict(), 'house_model.pth')
+    print("Training complete.")
 
 if __name__ == "__main__":
     main()

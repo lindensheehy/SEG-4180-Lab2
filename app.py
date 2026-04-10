@@ -14,10 +14,20 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY", "default-dev-key")
 app = Flask(__name__)
 
 # 2. Load Segmentation Model (Lab 2 Requirement)
-print("Loading Segmentation Model...")
-# Using a pretrained DeepLabV3 for demonstration; replace with your fine-tuned model path
-weights = models.segmentation.DeepLabV3_MobileNet_V3_Large_Weights.DEFAULT
-model = models.segmentation.deeplabv3_mobilenet_v3_large(weights=weights)
+print("Loading Custom Segmentation Model...")
+
+# Initialize the architecture with 2 classes (matching your training script)
+model = models.segmentation.deeplabv3_mobilenet_v3_large(num_classes=2)
+
+# Load your fine-tuned weights
+model_path = os.path.join(os.path.dirname(__file__), 'house_model.pth')
+if os.path.exists(model_path):
+    # map_location='cpu' ensures it works even if Docker isn't using a GPU
+    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+    print("Custom weights loaded successfully.")
+else:
+    print("WARNING: house_model.pth not found. The model will output random noise.")
+
 model.eval()
 
 # Transformation for the incoming image
